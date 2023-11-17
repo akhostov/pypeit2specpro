@@ -32,9 +32,9 @@ outinfoname : str
 
 # This will check to see if the filename does exist
 def check_path(filename):
-    if not os.path.isfile(filename):
-        raise argparse.ArgumentTypeError(f"{filename} does not exist.")
-    return filename
+	if not os.path.isfile(filename):
+		raise argparse.ArgumentTypeError(f"{filename} does not exist.")
+	return filename
 
 # This
 def check_same_values(arr):
@@ -51,6 +51,8 @@ parser = argparse.ArgumentParser(description='This is a wrapper for SpecPro')
 parser.add_argument('filename_1D', type=check_path, help='Path and Filename for the 1D spectra')
 parser.add_argument('filename_2D', type=check_path, help='Path and Filename for the 2D spectra')
 parser.add_argument("--outdir", "-o", help="Path To Store the Output Files", nargs='?',default="./")
+parser.add_argument("--flux_calib","-f",help="Output Flux-calibrated spectra", action='store_true',default=False)
+
 
 # Parse the Arguments
 args = parser.parse_args()
@@ -70,21 +72,47 @@ nspec = data_1D[0].header["NSPEC"]
 slit_ids = [hdu.name for hdu in data_1D[1:-1]] # the cutoff at the end is for "MSC01-DETECTOR" todo: does this apply for all versions of pypeit reduced spectra?
 
 # Define Mask Name
-maskname = data_2D[0].header["TARGET"]
+maskname = data_2D[0].header["TARGET"].replace(" ","_")
+print("Processing %s" % maskname)
 
 # Define then the 2D spectra
 flux_2D = data_2D[1].data - data_2D[3].data # EXT=1 SCIIMG and EXT=2 SKYMODEL
 lambda_2D = data_2D[8].data # EXT8 WAVEIMG
 ivar_2D = data_2D[2].data #1./(1./data_2D[2].data + 1./data_2D[5].data) #EXT=2 IVARRAW and EXT=5 IVARMODEL
+
+# Define a counter for specpro slit number
+counter = 0 
+old_slit_id = -99 # garbage to begin check
 for ii in range(nspec):
 
+	# Get Slit ID and Target Name
 	slit_id = int(slit_ids[ii].split("-")[1].split("SLIT")[1])
-	slitname = data_1D[ii+1].header["MASKDEF_OBJNAME"]
+
+	# Extract Slitname and ID and have a flag for single object MOS observations
+	if "MASKDEF_OBJNAME" not in data_1D[ii+1].header:
+		slitname = data_1D[ii+1].header["NAME"]
+		maskdef_id = maskname
+		maskdef_objname = maskname
+		target_RA = data_1D[0].header["RA"]
+		target_DEC = data_1D[0].header["DEC"]
+
+	else:
+		slitname = data_1D[ii+1].header["MASKDEF_OBJNAME"]
+		maskdef_id = data_1D[ii+1].header["MASKDEF_ID"]
+		maskdef_objname = data_1D[ii+1].header["MASKDEF_OBJNAME"]
+		target_RA = data_1D[ii+1].header["RA"]
+		target_DEC = data_1D[ii+1].header["DEC"]
+
+	# Check if there was a change in the slit id ()
+	if (ii > 0) & (slit_id == old_slit_id):
+		counter = counter
+	else:
+		counter += 1
 
 	# Find where slit_id is in the 2D data
 	ind = data_2D[10].data["SPAT_ID"] == slit_id
 
-	print("Running for Object: %s" % slitname)
+	print("Running for Object: %s Slit_ID: %i" % (slitname,slit_id))
 	# Extract the slit using the left and right boundaries of the slit
 	left_init = np.squeeze(data_2D[10].data["left_init"][ind])
 	right_init = np.squeeze(data_2D[10].data["right_init"][ind])
@@ -129,7 +157,7 @@ for ii in range(nspec):
 	]))
 
 	# Write out the 2D spectra file
-	out_2dspec = f"spec2d.{maskname}.{ii:03d}.{slitname}.fits"	
+	out_2dspec = f"spec2d.{maskname}.{counter}.{slitname}.fits"	
 	table_2D.writeto(outdir+out_2dspec, overwrite=True)
 
 
@@ -138,11 +166,20 @@ for ii in range(nspec):
 
 	# Note: FLux Calibrated Spectra can have some issues in Specpro
 	# especially if the calibration is poor. Best to use raw counts.
-	lambda_1D = spec1d["OPT_WAVE"]
-	#flux_1d = spec1d["OPT_FLAM"]*1e-17 # erg/s/cm2/AA
-	#ivar_1d = spec1d["OPT_FLAM_IVAR"]/(1e-17)**2.
-	flux_1d = spec1d["OPT_COUNTS"]
-	ivar_1d = spec1d["OPT_COUNTS_IVAR"]
+	try:
+		lambda_1D = spec1d["OPT_WAVE"]
+
+		if args.flux_calib: 
+			flux_1d = spec1d["OPT_FLAM"]*1e-17 # erg/s/cm2/AA
+			ivar_1d = spec1d["OPT_FLAM_IVAR"]/(1e-17)**2.
+
+		else:
+			flux_1d = spec1d["OPT_COUNTS"]
+			ivar_1d = spec1d["OPT_COUNTS_IVAR"]
+
+	except:
+		print("Issue in the Fits Column Definition. Possibly Problem with Slit %i" % slit_id)
+		continue
 
 	# Remove the tail end of lambda where it is set to 0
 	index = np.flatnonzero(lambda_1D[::-1] != 0)[::-1]
@@ -159,22 +196,25 @@ for ii in range(nspec):
 	])
 
 	# Save the FITS table to a file
-	out_1dspec = f"spec1d.{maskname}.{ii:03d}.{slitname}.fits"
+	out_1dspec = f"spec1d.{maskname}.{counter}.{slitname}.fits"
 	table_1D.writeto(outdir+out_1dspec, overwrite=True)
 
 
 	### Now let's create the extraction info of this object
-	outinfoname = outdir+f"info.{maskname}.{ii:03d}.{slitname}.dat"	
+	outinfoname = outdir+f"info.{maskname}.{counter}.{slitname}.dat"	
 	with open(outinfoname, 'w') as file:
 		head = "# info file for %s" % out_1dspec
 		file.write(head + '\n')
-		file.write('ID {}\n'.format(data_1D[ii+1].header["MASKDEF_ID"]))
-		file.write('name {}\n'.format(data_1D[ii+1].header["MASKDEF_OBJNAME"]))
+		file.write('ID {}\n'.format(maskdef_id))
+		file.write('name {}\n'.format(maskdef_objname))
 		file.write('slitno {}\n'.format(ii))
 		file.write('extractpos {}\n'.format(data_1D[ii+1].header["SPAT_FRACPOS"]*(right_init - left_init)))
 		file.write('extractwidth {}\n'.format(data_1D[ii+1].header["FWHM"]))
-		file.write('RA {}\n'.format(data_1D[ii+1].header["RA"]))
-		file.write('DEC {}\n'.format(data_1D[ii+1].header["DEC"]))
+		file.write('RA {}\n'.format(target_RA))
+		file.write('DEC {}\n'.format(target_DEC))
+
+	# Keep for counter
+	old_slit_id = slit_id
 
 data_1D.close()
 data_2D.close()
